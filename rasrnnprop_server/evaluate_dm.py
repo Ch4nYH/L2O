@@ -33,7 +33,7 @@ from six.moves import xrange
 import tensorflow as tf
 
 from tensorflow.contrib.learn.python.learn import monitored_session as ms
-import meta_rnnprop_mt as meta
+import meta_rs_mt as meta
 # import meta
 import util
 import pdb
@@ -96,7 +96,7 @@ def main(_):
   elif FLAGS.optimizer == "L2L":
     if FLAGS.path is None:
       logging.warning("Evaluating untrained L2L optimizer")
-    optimizer = meta.MetaOptimizer(FLAGS.num_mt, FLAGS.beta1, FLAGS.beta2, **net_config)
+    optimizer = meta.MetaOptimizer(FLAGS.num_mt, **net_config)
     # meta_loss = optimizer.meta_loss(problem, 1, net_assignments=net_assignments)
     
     meta_loss, _, _, _, _, seq_step, \
