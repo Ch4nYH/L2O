@@ -121,7 +121,7 @@ def main(_):
     loss_record = []
     for ep in xrange(FLAGS.num_epochs):
       # Training.
-      time, cost = util.run_eval_epoch(sess, cost_op, [update], num_unrolls, step=seq_step)                   
+      time, cost = util.run_eval_epoch(sess, cost_op, [update], num_unrolls)                   
       total_time += time
 
       total_cost += sum(cost)/num_unrolls
