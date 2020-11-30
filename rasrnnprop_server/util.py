@@ -108,6 +108,7 @@ def run_epoch(sess, cost_op, ops, reset, num_unrolls, stddev=None, num_rd=10,
               feed_dict[pl] = dat
           if step is not None:
               feed_dict[step] = ri * unroll_len + 1
+          print(feed_dict)
           cost = sess.run([cost_op] + ops, feed_dict=feed_dict)[0]
   return timer() - start, cost
 
