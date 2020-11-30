@@ -519,8 +519,8 @@ class MetaOptimizer(object):
       print("Optimizer '{}' variables".format(k))
       print([op for op in snt.get_variables_in_module(net)])
 
-    return MetaLoss(loss, update, reset, fx_final, x_final), scale, x, constants, subsets,\
-           loss_mt, update_mt, reset_mt, mt_labels, mt_inputs, hess_norm_approx
+    return MetaLoss(loss, update, reset, fx_final, x_final)#, scale, x, constants, subsets,\
+           #loss_mt, update_mt, reset_mt, mt_labels, mt_inputs, hess_norm_approx
 
   def meta_minimize(self, make_loss, len_unroll, learning_rate=0.01, **kwargs):
     """Returns an operator minimizing the meta-loss.
