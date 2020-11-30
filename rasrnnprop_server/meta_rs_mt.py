@@ -22,12 +22,10 @@ import collections
 import contextlib
 import os
 import pdb
-import pickle
 
 import mock
 import sonnet as snt
 import tensorflow as tf
-
 from tensorflow.python.framework import ops
 from tensorflow.python.util import nest
 
@@ -77,6 +75,14 @@ def _nested_variable(init, name=None, trainable=False):
     return result
   else:
     return tf.Variable(init, name=name, trainable=trainable)
+
+
+def _nested_tuple(elems):
+  if isinstance(elems, list) or isinstance(elems, tuple):
+    result = tuple([_nested_tuple(x) for x in elems])
+    return result
+  else:
+    return elems
 
 
 def _wrap_variable_creation(func, custom_getter):
@@ -219,7 +225,7 @@ class MetaOptimizer(object):
   tasks.
   """
 
-  def __init__(self, num_mt, **kwargs):
+  def __init__(self, **kwargs):
     """Creates a MetaOptimizer.
 
     Args:
@@ -230,7 +236,6 @@ class MetaOptimizer(object):
           meta_loss method).
     """
     self._nets = None
-    self.num_mt = num_mt
 
     if not kwargs:
       # Use a default coordinatewise network if nothing is given. this allows
@@ -247,55 +252,19 @@ class MetaOptimizer(object):
     else:
       self._config = kwargs
 
-  def save(self, sess, path=None, index=None):
+  def save(self, sess, path=None):
     """Save meta-optimizer."""
     result = {}
     for k, net in self._nets.items():
       if path is None:
         filename = None
         key = k
-      elif index is not None:
-        filename = os.path.join(path, "{}.l2l-{}".format(k, index))
-        key = filename
       else:
         filename = os.path.join(path, "{}.l2l".format(k))
         key = filename
       net_vars = networks.save(net, sess, filename=filename)
       result[key] = net_vars
     return result
-
-
-  def restorer(self):
-    self.restore_pl = {}
-    self.assigns = {}
-    for k, net in self._nets.items():
-      vars = snt.get_variables_in_module(net)
-      self.restore_pl[k] = collections.defaultdict(dict)
-      self.assigns[k] = collections.defaultdict(dict)
-      for v in vars:
-        split = v.name.split(":")[0].split("/")
-        module_name = split[-2]
-        variable_name = split[-1]
-        self.restore_pl[k][module_name][variable_name] =\
-          tf.placeholder(name="{}_{}_pl".format(module_name, variable_name), shape=v.get_shape(), dtype=v.dtype)
-        self.assigns[k][module_name][variable_name] = tf.assign(v, self.restore_pl[k][module_name][variable_name])
-
-
-  def restore(self, sess, path, index):
-    ops = []
-    feed = {}
-    for k, net in self._nets.items():
-      filename = os.path.join(path, "{}.l2l-{}".format(k, index))
-      data = pickle.load(open(filename, "rb"))
-      vars = snt.get_variables_in_module(net)
-      for v in vars:
-        split = v.name.split(":")[0].split("/")
-        module_name = split[-2]
-        variable_name = split[-1]
-        feed[self.restore_pl[k][module_name][variable_name]] = data[module_name][variable_name]
-        ops.append(self.assigns[k][module_name][variable_name])
-    sess.run(ops, feed_dict=feed)
-
 
   def meta_loss(self,
                 make_loss,
@@ -328,16 +297,6 @@ class MetaOptimizer(object):
     print("Problem variables")
     print([op.name for op in constants])
 
-    # hess
-    fx = _make_with_custom_variables(make_loss, x)
-    grads = tf.gradients(fx, x)
-    hess_norm_approx = sum([tf.reduce_sum(g*g) for g in grads])
-
-    # create scale placeholder here
-    scale = []
-    for k in x:
-      scale.append(tf.placeholder_with_default(tf.ones(shape=k.shape), shape=k.shape, name=k.name[:-2] + "_scale"))
-
     # Create the optimizer networks and find the subsets of variables to assign
     # to each optimizer.
     nets, net_keys, subsets = _make_nets(x, self._config, net_assignments)
@@ -356,6 +315,7 @@ class MetaOptimizer(object):
               [net.initial_state_for_inputs(x[j], dtype=tf.float32)
                for j in subset],
               name="state", trainable=False))
+    print(state)
     def update(net, fx, x, state):
       """Parameter and RNN state update."""
       with tf.name_scope("gradients"):
@@ -370,6 +330,7 @@ class MetaOptimizer(object):
 
       with tf.name_scope("deltas"):
         deltas, state_next = zip(*[net(g, s) for g, s in zip(gradients, state)])
+        state_next = _nested_tuple(state_next)
         state_next = list(state_next)
 
       return deltas, state_next
@@ -380,8 +341,7 @@ class MetaOptimizer(object):
       state_next = []
 
       with tf.name_scope("fx"):
-        scaled_x = [x[k] * scale[k] for k in range(len(scale))]
-        fx = _make_with_custom_variables(make_loss, scaled_x)
+        fx = _make_with_custom_variables(make_loss, x)
         fx_array = fx_array.write(t, fx)
 
       with tf.name_scope("dx"):
@@ -390,8 +350,7 @@ class MetaOptimizer(object):
           deltas, s_i_next = update(nets[key], fx, x_i, s_i)
 
           for idx, j in enumerate(subset):
-            delta = deltas[idx]
-            x_next[j] += delta
+            x_next[j] += deltas[idx]
           state_next.append(s_i_next)
 
       with tf.name_scope("t_next"):
@@ -400,7 +359,7 @@ class MetaOptimizer(object):
       return t_next, fx_array, x_next, state_next
 
     # Define the while loop.
-    fx_array = tf.TensorArray(tf.float32, size=len_unroll+1,
+    fx_array = tf.TensorArray(tf.float32, size=len_unroll + 1,
                               clear_after_read=False)
     _, fx_array, x_final, s_final = tf.while_loop(
         cond=lambda t, *_: t < len_unroll,
@@ -411,88 +370,10 @@ class MetaOptimizer(object):
         name="unroll")
 
     with tf.name_scope("fx"):
-      scaled_x_final = [x_final[k] * scale[k] for k in range(len(scale))]
-      fx_final = _make_with_custom_variables(make_loss, scaled_x_final)
+      fx_final = _make_with_custom_variables(make_loss, x_final)
       fx_array = fx_array.write(len_unroll, fx_final)
 
     loss = tf.reduce_sum(fx_array.stack(), name="loss")
-
-    ##################################
-    ### multi task learning losses ###
-    ##################################
-    # state (num_subsets, num_x, (num_layers, (h,c)))
-    # state_reshape (num_mt, num_subsets, (num_layers, (h, c)))
-    state_reshape = []
-    num_layers = len(state[0][0])
-    for mti in range(self.num_mt):
-      state_reshape_mti = []
-      for state_subset in state:
-        state_layers = ()
-        for li in range(num_layers):
-          h = tf.concat([st_x[li][0] for st_x in state_subset], axis=0)
-          c = tf.concat([st_x[li][1] for st_x in state_subset], axis=0)
-          h = tf.Variable(h, name="state_reshape_h", trainable=False)
-          c = tf.Variable(c, name="state_reshape_c", trainable=False)
-          state_layers += ((h, c),)
-        state_reshape_mti.append(state_layers)
-      state_reshape.append(state_reshape_mti)
-    if self.num_mt > 0:
-      shapes = [st_subset[0][0].get_shape().as_list()[0] for st_subset in state_reshape[0]]
-    else:
-      shapes = []
-    num_params_total = sum(shapes)
-    print("number of parameters = {}".format(num_params_total))
-    # placeholder (num_mt, num_subsets, len_unroll, num_params)
-    mt_labels = []
-    mt_inputs = []
-    for i in range(self.num_mt):
-      mt_labels.append(
-        [tf.placeholder(dtype=tf.float32, shape=(len_unroll, shapes[j]),
-                        name="mt{}_label_subset{}".format(i, j))
-         for j in range(len(subsets))]
-      )
-      mt_inputs.append(
-        [tf.placeholder(dtype=tf.float32, shape=(len_unroll, shapes[j]),
-                        name="mt{}_input_subset{}".format(i, j))
-         for j in range(len(subsets))]
-      )
-
-    # loop
-    def time_step_mt(mti):
-      def time_step_func(t, loss_array, states):
-        loss_t_sum = 0.0
-        state_next = []
-        for si, (k, st) in enumerate(zip(net_keys, states)):
-          net = nets[k]
-          g_input = tf.gather(mt_inputs[mti][si], indices=t, axis=0)
-          g_label = tf.gather(mt_labels[mti][si], indices=t, axis=0)
-          delta, state_next_si = net(g_input, st, linear_i=-1)
-          loss_t_sum += tf.reduce_sum((g_label - delta) * (g_label - delta)) * 0.5
-          state_next.append(state_next_si)
-        loss_t = loss_t_sum / num_params_total
-        loss_array = loss_array.write(t, loss_t)
-        t_next = t + 1
-        return t_next, loss_array, state_next
-
-      return time_step_func
-
-    loss_arrays = [tf.TensorArray(tf.float32, size=len_unroll, clear_after_read=False)
-                   for _ in range(self.num_mt)]
-    state_reshape_final = []
-    for mti in range(self.num_mt):
-      loss_array = loss_arrays[mti]
-      _, loss_array, state_reshape_final_mti = tf.while_loop(
-        cond=lambda t, *_: t < len_unroll,
-        body=time_step_mt(mti),
-        loop_vars=(0, loss_array, state_reshape[mti]),
-        parallel_iterations=1,
-        swap_memory=True,
-        name="unroll_mt")
-      loss_arrays[mti] = loss_array
-      state_reshape_final.append(state_reshape_final_mti)
-    # loss
-    loss_mt = [tf.reduce_sum(loss_array.stack(), name="loss_mt{}".format(i))
-               for i, loss_array in enumerate(loss_arrays)]
 
     # Reset the state; should be called at the beginning of an epoch.
     with tf.name_scope("reset"):
@@ -501,26 +382,18 @@ class MetaOptimizer(object):
       # Empty array as part of the reset process.
       reset = [tf.variables_initializer(variables), fx_array.close()]
 
-      # mt
-      variables_mt = [nest.flatten(state_reshape[mti]) for mti in range(self.num_mt)]
-      reset_mt = [[tf.variables_initializer(variables_mt[mti]), loss_arrays[mti].close()]
-                  for mti in range(self.num_mt)]
-
     # Operator to update the parameters and the RNN state after our loop, but
     # during an epoch.
     with tf.name_scope("update"):
       update = (nest.flatten(_nested_assign(x, x_final)) +
                 nest.flatten(_nested_assign(state, s_final)))
-      update_mt = [(nest.flatten(_nested_assign(state_reshape[mti], state_reshape_final[mti])))
-                   for mti in range(self.num_mt)]
 
     # Log internal variables.
     for k, net in nets.items():
       print("Optimizer '{}' variables".format(k))
       print([op for op in snt.get_variables_in_module(net)])
 
-    return MetaLoss(loss, update, reset, fx_final, x_final)#, scale, x, constants, subsets,\
-           #loss_mt, update_mt, reset_mt, mt_labels, mt_inputs, hess_norm_approx
+    return MetaLoss(loss, update, reset, fx_final, x_final)
 
   def meta_minimize(self, make_loss, len_unroll, learning_rate=0.01, **kwargs):
     """Returns an operator minimizing the meta-loss.
@@ -535,15 +408,7 @@ class MetaOptimizer(object):
     Returns:
       namedtuple containing (step, update, reset, fx, x)
     """
-    info, scale, x, constants, subsets, loss_mt, update_mt, reset_mt, mt_labels, mt_inputs, hess_norm_approx = self.meta_loss(make_loss, len_unroll, **kwargs)
+    info = self.meta_loss(make_loss, len_unroll, **kwargs)
     optimizer = tf.train.AdamOptimizer(learning_rate)
     step = optimizer.minimize(info.loss)
-    # mt
-    optimizer_mt = []
-    steps_mt = []
-    for loss_mti in loss_mt:
-      optimizer_mt.append(tf.train.AdamOptimizer(learning_rate))
-      steps_mt.append(optimizer_mt[-1].minimize(loss_mti))
-    self.restorer()
-    return MetaStep(step, *info[1:]), scale, x, constants, subsets, \
-           loss_mt, steps_mt, update_mt, reset_mt, mt_labels, mt_inputs, hess_norm_approx
+    return MetaStep(step, *info[1:])
