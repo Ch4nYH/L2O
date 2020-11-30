@@ -99,8 +99,8 @@ def main(_):
     optimizer = meta.MetaOptimizer(FLAGS.num_mt, **net_config)
     # meta_loss = optimizer.meta_loss(problem, 1, net_assignments=net_assignments)
     
-    meta_loss, _, _, _, _, seq_step, \
-    _, _, _, _, _, _ = optimizer.meta_loss(problem, 1, net_assignments=net_assignments)
+    meta_loss, scale, x, constants, subsets,\
+           loss_mt, update_mt, reset_mt, mt_labels, mt_inputs, hess_norm_approx = optimizer.meta_loss(problem, 1, net_assignments=net_assignments)
     #这里原来是各种名字的变量的，但是似乎object never used就是指这些，那我就全部用下划线变量代替了
 
     _, update, reset, cost_op, _ = meta_loss
