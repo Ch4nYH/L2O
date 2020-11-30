@@ -67,72 +67,70 @@ flags.DEFINE_integer("num_mt", 1, "")
 
 def main(_):
   # Configuration.
-  num_unrolls = FLAGS.num_steps
+    num_unrolls = FLAGS.num_steps
 
-  if FLAGS.seed:
-    tf.set_random_seed(FLAGS.seed)
+    if FLAGS.seed:
+        tf.set_random_seed(FLAGS.seed)
 
-  # Problem.
-  # problem, net_config, net_assignments = util.get_config(FLAGS.problem,
-  #                                                        FLAGS.path)
-  param_dict = {}
-  param_dict['bs'] = FLAGS.bs
-  param_dict['m'] = FLAGS.m
-  param_dict['n'] = FLAGS.n
-  print(param_dict)
-  problem, net_config, net_assignments = util.get_config(FLAGS.problem, mode=FLAGS.mode,#加入mode
-                                                        num_linear_heads=1, init=FLAGS.init, 
-                                                        path=FLAGS.path, param=param_dict)
-  # Optimizer setup.
-  if FLAGS.optimizer == "Adam":
-    cost_op = problem()
-    problem_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
-    problem_reset = tf.variables_initializer(problem_vars)
+    # Problem.
+    # problem, net_config, net_assignments = util.get_config(FLAGS.problem,
+    #                                                        FLAGS.path)
+    param_dict = {}
+    param_dict['bs'] = FLAGS.bs
+    param_dict['m'] = FLAGS.m
+    param_dict['n'] = FLAGS.n
+    print(param_dict)
+    problem, net_config, net_assignments = util.get_config(FLAGS.problem, mode=FLAGS.mode,#加入mode
+                                                            num_linear_heads=1, init=FLAGS.init, 
+                                                            path=FLAGS.path, param=param_dict)
+    # Optimizer setup.
+    if FLAGS.optimizer == "Adam":
+        cost_op = problem()
+        problem_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+        problem_reset = tf.variables_initializer(problem_vars)
 
-    optimizer = tf.train.AdamOptimizer(FLAGS.learning_rate)
-    optimizer_reset = tf.variables_initializer(optimizer.get_slot_names())
-    update = optimizer.minimize(cost_op)
-    reset = [problem_reset, optimizer_reset]
-  elif FLAGS.optimizer == "L2L":
-    if FLAGS.path is None:
-      logging.warning("Evaluating untrained L2L optimizer")
-    optimizer = meta.MetaOptimizer(FLAGS.num_mt, **net_config)
-    # meta_loss = optimizer.meta_loss(problem, 1, net_assignments=net_assignments)
-    
-    meta_loss, scale, x, constants, subsets,\
-           loss_mt, update_mt, reset_mt, mt_labels, mt_inputs, hess_norm_approx = optimizer.meta_loss(problem, 1, net_assignments=net_assignments)
-    #这里原来是各种名字的变量的，但是似乎object never used就是指这些，那我就全部用下划线变量代替了
+        optimizer = tf.train.AdamOptimizer(FLAGS.learning_rate)
+        optimizer_reset = tf.variables_initializer(optimizer.get_slot_names())
+        update = optimizer.minimize(cost_op)
+        reset = [problem_reset, optimizer_reset]
+    elif FLAGS.optimizer == "L2L":
+        if FLAGS.path is None:
+            logging.warning("Evaluating untrained L2L optimizer")
+        optimizer = meta.MetaOptimizer(**net_config)
+        meta_loss = optimizer.meta_loss(problem, 1, net_assignments=net_assignments)
+        _, update, reset, cost_op, _ = meta_loss
+    else:
+        raise ValueError("{} is not a valid optimizer".format(FLAGS.optimizer))
 
-    _, update, reset, cost_op, _ = meta_loss
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    with ms.MonitoredSession() as sess:
+        sess.run(reset)
+        # Prevent accidental changes to the graph.
+        tf.get_default_graph().finalize()
 
-  else:
-    raise ValueError("{} is not a valid optimizer".format(FLAGS.optimizer))
+        total_time = 0
+        total_cost = 0
+        loss_record = []
+        for e in xrange(FLAGS.num_epochs):
+            # Training.
+            time, cost = util.run_eval_epoch(sess, cost_op, [update], num_unrolls)
+            total_time += time
+            total_cost += sum(cost) / num_unrolls
+            loss_record += cost
 
-  config = tf.ConfigProto()
-  config.gpu_options.allow_growth = True
-  with ms.MonitoredSession() as sess:
-  # with tf.Session(config=config) as sess:
-    sess.run(reset)
-    # Prevent accidental changes to the graph.
-    tf.get_default_graph().finalize()
+        # Results.
+        util.print_stats("Epoch {}".format(FLAGS.num_epochs), total_cost,
+                         total_time, FLAGS.num_epochs)
 
-    total_time = 0
-    total_cost = 0
-    loss_record = []
-    for ep in xrange(FLAGS.num_epochs):
-      # Training.
-      time, cost = util.run_eval_epoch(sess, cost_op, [update], num_unrolls)                   
-      total_time += time
+    if FLAGS.output_path is not None:
+        if not os.path.exists(FLAGS.output_path):
+            os.mkdir(FLAGS.output_path)
+    output_file = '{}/{}_eval_loss_record.pickle-{}'.format(FLAGS.output_path, FLAGS.optimizer, FLAGS.problem)
+    with open(output_file, 'wb') as l_record:
+        pickle.dump(loss_record, l_record)
+    print("Saving evaluate loss record {}".format(output_file))
 
-      total_cost += sum(cost)/num_unrolls
-      loss_record += cost
-      print(ep, cost[-1])
-    # Results.
-    util.print_stats("Epoch {}".format(FLAGS.num_epochs), total_cost,
-                     total_time, FLAGS.num_epochs)
-  with open('{}/{}_eval_loss_record.pickle'.format(FLAGS.path, FLAGS.optimizer), 'wb') as l_record:
-    pickle.dump(loss_record, l_record)
-  print("Saving evaluate loss record {}".format(FLAGS.path))
 
 if __name__ == "__main__":
   tf.app.run()
