@@ -96,7 +96,7 @@ def main(_):
     elif FLAGS.optimizer == "L2L":
         if FLAGS.path is None:
             logging.warning("Evaluating untrained L2L optimizer")
-        optimizer = meta.MetaOptimizer(**net_config)
+        optimizer = meta.MetaOptimizer(FLAGS.num_mt, **net_config)
         meta_loss = optimizer.meta_loss(problem, 1, net_assignments=net_assignments)
         _, update, reset, cost_op, _ = meta_loss
     else:
